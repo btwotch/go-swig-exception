@@ -7,137 +7,289 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"os"
+	"strings"
 )
 
-func walkCallExpr(node ast.Node) {
-	switch n := node.(type) {
-	case *ast.Ident:
-		fmt.Printf("default: %s\n", n)
-		if n.String() == "panic" {
-			fmt.Printf("P\n")
+type Method struct {
+	name       string
+	parameters []string
+	returns    []string
+}
+
+func commaSeparatedList(l []string, elemPrefix string, extra ...string) string {
+	var c string
+
+	if len(l) > 0 {
+		if elemPrefix == "" {
+			c = l[0]
+		} else {
+			c = elemPrefix + "0"
 		}
-	default:
-		fmt.Printf("default: %T\n", n)
-	}
-}
 
-func walkExpr(node ast.Node) {
-	switch n := node.(type) {
-
-	case *ast.CallExpr:
-		walkCallExpr(n.Fun)
-	}
-}
-
-func walkStmt(node ast.Node) {
-	switch n := node.(type) {
-	case *ast.ExprStmt:
-		walkExpr(n.X)
-	}
-}
-
-func stmtIsPanic(node ast.Node) bool {
-	if _, ok := node.(*ast.ExprStmt); !ok {
-		return false
-	}
-	node = node.(*ast.ExprStmt).X
-	if _, ok := node.(*ast.CallExpr); !ok {
-		return false
-	}
-	node = node.(*ast.CallExpr).Fun
-	if _, ok := node.(*ast.Ident); !ok {
-		return false
-	}
-
-	if node.(*ast.Ident).String() == "panic" {
-		fmt.Printf("P\n")
-		return true
-	}
-	return false
-}
-
-// returns true if has panic
-func walkFunc(node ast.Node) bool {
-	switch n := node.(type) {
-
-	case *ast.BlockStmt:
-		for i, x := range n.List {
-			if walkFunc(x) {
-				return true
-			}
-			//walkStmt(x)
-			if stmtIsPanic(x) {
-				/*
-					retstmt := new(ast.ReturnStmt)
-					retstmt.Results = append(retstmt.Results, ast.NewIdent("nil"))
-					retstmt.Results = append(retstmt.Results, ast.NewIdent("fmt.Errorf(\"this would have been a panic\")"))
-					n.List[i] = retstmt
-				*/
-				fmt.Println(fmt.Sprintf("panic found %d", i))
-				return true
+		for i, e := range l[1:] {
+			if elemPrefix == "" {
+				c += fmt.Sprintf(", %s", e)
+			} else {
+				c += fmt.Sprintf(", %s%d", elemPrefix, i+1)
 			}
 		}
-	case *ast.IfStmt:
-		if walkFunc(n.Body) {
-			return true
-		}
-		//default:
-		//	fmt.Printf("default: %T\n", n)
 	}
 
-	return false
+	if len(extra) == 0 {
+		return c
+	}
+	if len(l) > 0 {
+		c += ", "
+	}
+
+	c += strings.Join(extra, ", ")
+
+	return c
 }
 
-func walkDecls(node ast.Node) {
+func (m Method) returnList() string {
+	return commaSeparatedList(m.returns, "")
+}
+
+func (m Method) parameterList() string {
+	pl := ""
+	for index, param := range m.parameters {
+		pl += fmt.Sprintf("arg%d %s, ", index, param)
+	}
+
+	return pl
+}
+
+func (m Method) unpanicCaller() string {
+	c := "func (u *__unpanic_wrap_struct) "
+	c += m.name
+	c += "("
+	c += m.parameterList()
+	c += ")"
+	c += " "
+	c += "("
+	c += m.returnList()
+	c += ")"
+	c += "{\n"
+	c += `
+	defer func() {
+		if r := recover(); r != nil {
+			u.err = fmt.Errorf("%+v", r)
+		}
+	}()
+
+`
+	c += "\t"
+	if len(m.returns) > 0 {
+		c += "return "
+	}
+	c += "__unpanic_" + m.name
+	// function arguments
+	c += "("
+	c += commaSeparatedList(m.parameters, "arg")
+	c += ")\n"
+
+	c += "}\n"
+
+	c += "\n\n\n"
+
+	c += "func " + m.name
+	c += "("
+	c += m.parameterList()
+	c += ")"
+	c += " "
+	c += "("
+	c += commaSeparatedList(m.returns, "", "error")
+	c += ")"
+
+	c += "{\n"
+	c += "\tu := __unpanic_wrap_struct{}\n"
+
+	c += "\t"
+	c += commaSeparatedList(m.returns, "ret")
+	if len(m.returns) > 0 {
+		c += " := "
+	}
+	c += "u." + m.name
+
+	// function arguments
+	c += "("
+	c += commaSeparatedList(m.parameters, "arg")
+	c += ")\n"
+
+	c += "\treturn "
+	c += commaSeparatedList(m.parameters, "ret", "u.err")
+	c += "\n}\n"
+
+	return c
+}
+
+func (m Method) trampoline(receiver string) string {
+	var c string
+
+	c += "func (r "
+	c += receiver
+	c += ") __unpanic_trampoline_"
+	c += m.name
+	c += "("
+	c += m.parameterList()
+	c += "__unpanic_err *error"
+	c += ")"
+	c += " "
+	c += "("
+	c += m.returnList()
+	c += ") "
+	c += "{"
+	c += `
+        defer func() {
+                if r := recover(); r != nil {
+                        *__unpanic_err = fmt.Errorf("%+v", r)
+                }
+        }()
+`
+	c += "\n\t"
+
+	if len(m.returns) > 0 {
+		c += "return "
+	}
+	c += "r.__unpanic_" + m.name
+	c += "("
+	c += commaSeparatedList(m.parameters, "arg")
+	c += ")\n"
+
+	c += "}\n\n"
+
+	c += "func (r "
+	c += receiver
+	c += ") "
+	c += m.name
+	c += "("
+	c += m.parameterList()
+	c += ")"
+	c += " "
+	c += "("
+	c += commaSeparatedList(m.returns, "", "error")
+	c += ")"
+	c += "{\n"
+
+	c += "\tvar err error\n"
+
+	c += "\t"
+
+	c += commaSeparatedList(m.returns, "ret")
+	if len(m.returns) > 0 {
+		c += " := "
+	}
+	c += "r.__unpanic_trampoline_" + m.name
+	c += "("
+	c += commaSeparatedList(m.parameters, "arg", "&err")
+	c += ")\n"
+
+	c += "\treturn "
+	c += commaSeparatedList(m.returns, "ret", "err")
+	c += "\n}\n"
+	return c
+}
+
+type PanicWrapper struct {
+	// map from receiver to method
+	methods map[string][]Method
+}
+
+func (pw *PanicWrapper) walkDecls(node ast.Node) {
+
 	switch n := node.(type) {
+	case *ast.GenDecl:
+		//fmt.Printf(">>>>>> type: %T content: %+v\n", node, node)
+		for _, spec := range n.Specs {
+			//fmt.Printf("\t>>>>>> type: %T content: %+v\n", spec, spec)
+			switch s := spec.(type) {
+				case *ast.TypeSpec:
+				i, ok := s.Type.(*ast.InterfaceType)
+				if !ok {
+					continue
+				}
+				//fmt.Printf("\t>>>>>> content: %+v\n", i.Methods)
+				for _, field := range i.Methods.List {
+					f, ok := field.Type.(*ast.FuncType)
+					if !ok {
+						continue
+					}
+					errorFuncResult := &ast.Field{}
+					//fmt.Printf("\t>>>>>> f: %T f: %+v\n", f, f)
+					//fmt.Printf("\t>>>>>> fieldnames: %T fieldnames: %+v\n", field.Names[0], field.Names[0].Name)
+					if strings.HasPrefix(field.Names[0].Name, "Swig") {
+						continue
+					}
+					errorFuncResult.Type = ast.NewIdent("error")
+					f.Results.List = append(f.Results.List, errorFuncResult)
+
+				}
+			}
+		}
 	case *ast.FuncDecl:
-		fmt.Printf(">>>>>>>> func decl: %s\n", n.Name)
-		// only change methods that don't have a receiver
-		if n.Recv != nil {
-			fmt.Printf("\ton %+v\n", n.Recv.List[0])
-			f := &ast.Field{}
-			f.Type = ast.NewIdent(fmt.Sprintf("__unpanic_%s", n.Recv.List[0].Type))
-			//f.Type = ast.NewIdent("__unpanic_blaasdf")
-			f.Names = append(f.Names, ast.NewIdent(n.Recv.List[0].Names[0].Name))
-			n.Recv.List[0] = f
+		method := Method{}
+		method.name = n.Name.Name
+
+		if strings.HasPrefix(n.Name.Name, "Swig") {
 			return
-		}
-		if n.Name.Name == "main" {
-			return
-		}
-		n.Name = ast.NewIdent("__unpanic_" + n.Name.Name)
-/*
-		if walkFunc(n.Body) {
-			fmt.Printf("panic: %+v\n", n)
-			if n.Type.Results != nil {
-				//	f := &ast.Field{}
-				//	f.Type = ast.NewIdent("error")
-				//	n.Type.Results.List = append(n.Type.Results.List, f)
-				fmt.Println("returns found")
-			}
 		}
 		if n.Type.Results != nil {
-			for _, x := range n.Type.Results.List {
-				fmt.Printf("type results: %+v\n", x)
+			for _, y := range n.Type.Results.List {
+				if i, ok := y.Type.(*ast.Ident); ok {
+					method.returns = append(method.returns, i.Name)
+				}
 			}
-			//fmt.Printf("func: %+v\n", *n.Type.Results.List)
 		}
-*/
+		if n.Type.Params != nil {
+			for _, y := range n.Type.Params.List {
+				if i, ok := y.Type.(*ast.Ident); ok {
+					method.parameters = append(method.parameters, i.Name)
+				}
+			}
+		}
+		if n.Recv != nil {
+			if i, ok := n.Recv.List[0].Type.(*ast.Ident); ok {
+				pw.methods[i.Name] = append(pw.methods[i.Name], method)
+			} else if s, ok := n.Recv.List[0].Type.(*ast.StarExpr); ok {
+				if i, ok := s.X.(*ast.Ident); ok {
+					pw.methods["*"+i.Name] = append(pw.methods["*"+i.Name], method)
+				}
+			}
+		} else {
+			if n.Name.Name == "main" && n.Recv == nil {
+				return
+			}
+			pw.methods[""] = append(pw.methods[""], method)
+		}
+		n.Name = ast.NewIdent("__unpanic_" + n.Name.Name)
 	}
 }
 
-func walk(node ast.Node) {
+func (pw *PanicWrapper) walk(node ast.Node) {
 	switch n := node.(type) {
 	case *ast.File:
 		for _, f := range n.Decls {
-			walkDecls(f)
+			pw.walkDecls(f)
 		}
 	}
+}
+
+func newPanicWrapper() *PanicWrapper {
+	pw := PanicWrapper{}
+	pw.methods = make(map[string][]Method)
+	return &pw
 }
 
 func main() {
 	var buf bytes.Buffer
-	filename := "test/exception.go"
+
+	if len(os.Args) != 2 {
+		fmt.Printf("Usage: %s <path to go file>\n", os.Args[0])
+		return
+	}
+	filename := os.Args[1]
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filename, nil, 0)
@@ -145,11 +297,27 @@ func main() {
 		panic("Could not open " + filename)
 	}
 
-	//ast.Print(fset, file)
-	walk(file)
+	pw := newPanicWrapper()
+	pw.walk(file)
 
-	fmt.Println("--------------------------------")
 	buf.Reset()
 	printer.Fprint(&buf, fset, file)
 	fmt.Println(buf.String())
+
+	fmt.Printf(`
+type __unpanic_wrap_struct struct {
+	err error
+}
+
+`)
+	for r, ms := range pw.methods {
+		for _, m := range ms {
+			if r == "" {
+				fmt.Printf("%s\n", m.unpanicCaller())
+			} else {
+				fmt.Printf("%s\n", m.trampoline(r))
+			}
+		}
+	}
+
 }
