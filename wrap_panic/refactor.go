@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"golang.org/x/tools/go/ast/astutil"
 	"os"
 	"strings"
 )
@@ -296,6 +297,8 @@ func main() {
 	if err != nil {
 		panic("Could not open " + filename)
 	}
+
+	astutil.AddNamedImport(fset, file, "", "fmt")
 
 	pw := newPanicWrapper()
 	pw.walk(file)
