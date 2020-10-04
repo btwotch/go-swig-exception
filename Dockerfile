@@ -14,5 +14,12 @@ COPY swig-example/example.i go/src/example/
 RUN mkdir -vp /root/swig-example
 COPY swig-example/runme.go /root/swig-example
 RUN cd /root/go/src/example/ && swig -go -c++ -intgosize 64 -o example_wrap.cxx example.i
+WORKDIR /root
+
+RUN mkdir /root/refactor
+COPY wrap_panic/refactor.go /root/refactor
+WORKDIR /root/refactor
+RUN go mod init refactor
+RUN go build refactor.go
 WORKDIR /root/swig-example
 RUN go build
