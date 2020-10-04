@@ -292,7 +292,7 @@ func main() {
 	filename := os.Args[1]
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filename, nil, 0)
+	file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 	if err != nil {
 		panic("Could not open " + filename)
 	}
