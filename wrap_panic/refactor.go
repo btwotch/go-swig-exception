@@ -120,7 +120,7 @@ func (m Method) unpanicCaller() string {
 	c += ")\n"
 
 	c += "\treturn "
-	c += commaSeparatedList(m.parameters, "ret", "u.err")
+	c += commaSeparatedList(m.returns, "ret", "u.err")
 	c += "\n}\n"
 
 	return c
