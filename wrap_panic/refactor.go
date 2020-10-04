@@ -202,28 +202,26 @@ func (pw *PanicWrapper) walkDecls(node ast.Node) {
 
 	switch n := node.(type) {
 	case *ast.GenDecl:
-		//fmt.Printf(">>>>>> type: %T content: %+v\n", node, node)
 		for _, spec := range n.Specs {
-			//fmt.Printf("\t>>>>>> type: %T content: %+v\n", spec, spec)
 			switch s := spec.(type) {
-				case *ast.TypeSpec:
+			case *ast.TypeSpec:
 				i, ok := s.Type.(*ast.InterfaceType)
 				if !ok {
 					continue
 				}
-				//fmt.Printf("\t>>>>>> content: %+v\n", i.Methods)
 				for _, field := range i.Methods.List {
 					f, ok := field.Type.(*ast.FuncType)
 					if !ok {
 						continue
 					}
-					errorFuncResult := &ast.Field{}
-					//fmt.Printf("\t>>>>>> f: %T f: %+v\n", f, f)
-					//fmt.Printf("\t>>>>>> fieldnames: %T fieldnames: %+v\n", field.Names[0], field.Names[0].Name)
 					if strings.HasPrefix(field.Names[0].Name, "Swig") {
 						continue
 					}
-					errorFuncResult.Type = ast.NewIdent("error")
+
+					errorFuncResult := &ast.Field{}
+					errorFuncResultIdent := ast.NewIdent("error")
+					errorFuncResult.Names = append(errorFuncResult.Names, ast.NewIdent("__unpanic_err"))
+					errorFuncResult.Type = errorFuncResultIdent
 					f.Results.List = append(f.Results.List, errorFuncResult)
 
 				}
@@ -280,6 +278,7 @@ func (pw *PanicWrapper) walk(node ast.Node) {
 func newPanicWrapper() *PanicWrapper {
 	pw := PanicWrapper{}
 	pw.methods = make(map[string][]Method)
+
 	return &pw
 }
 
